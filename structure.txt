@@ -1,0 +1,10 @@
+docx2md/
+├── Dockerfile
+├── requirements.txt
+├── README.md
+├── app/
+│   ├── __init__.py
+│   ├── main.py          # FastAPI приложение
+│   ├── converter.py     # ядро конвертации
+│   ├── cli.py           # CLI-вход
+│   └── utils.py         # вспомогательные функции
