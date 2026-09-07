@@ -53,4 +53,4 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
           repository: victorkozmin/docx2md
-          readme-filepath: ./README.md
+          readme-filepath: ./README-DOCKER.md
