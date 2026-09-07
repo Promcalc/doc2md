@@ -114,13 +114,33 @@ def process_footnotes(doc):
         footnote_map: dict {footnote_id (str): sequential_number (int)}
         footnote_texts: list of (sequential_number, text)
     """
-    # Получаем часть документа, содержащую сноски
-    footnotes_part = doc.part.footnotes_part
+    footnotes_part = None
+
+    # Способ 1: поиск части по типу связи (если доступен)
+    try:
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        footnotes_part = doc.part.package.part_related_by_type(
+            RT.FOOTNOTES, doc.part
+        )
+    except (AttributeError, KeyError):
+        pass
+
+    # Способ 2: если не найден, ищем часть по имени файла
     if footnotes_part is None:
-        return {}, []
+        try:
+            for part in doc.part.package.iter_parts():
+                if part.partname.endswith('/footnotes.xml'):
+                    footnotes_part = part
+                    break
+        except AttributeError:
+            pass
+
+    # Если сноски не найдены, возвращаем пустые словари
+    if footnotes_part is None:
+        return {}, {}
+
     # Парсим XML
     root = footnotes_part.element
-    # Ищем все элементы <w:footnote>
     footnote_elements = root.findall(qn('w:footnote'))
     footnotes = []
     for fn_elem in footnote_elements:
@@ -129,7 +149,6 @@ def process_footnotes(doc):
         paragraphs = fn_elem.findall(qn('w:p'))
         text_parts = []
         for p in paragraphs:
-            # Извлекаем текст из всех runs
             runs = p.findall(qn('w:r'))
             for r in runs:
                 t = r.find(qn('w:t'))
@@ -138,6 +157,7 @@ def process_footnotes(doc):
         full_text = ' '.join(text_parts).strip()
         if full_text:
             footnotes.append((fn_id, full_text))
+
     # Нумеруем последовательно
     footnote_map = {}
     footnote_texts = []
