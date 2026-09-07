@@ -5,7 +5,7 @@ import re
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import qn
-from app.utils import escape_md, get_heading_level, is_heading
+from app.utils import escape_md, get_heading_level, is_heading, get_heading_level_by_formatting
 
 # ---------- Работа со списками ----------
 def get_list_info(paragraph):
@@ -37,17 +37,15 @@ def process_paragraph(para, footnote_map):
     Обрабатывает один параграф, возвращает строку Markdown или None (если пустой).
     footnote_map: dict {footnote_id: sequential_number}
     """
-    # Сначала обрабатываем runs: заменяем ссылки на сноски
+    # Заменяем сноски
     new_runs = []
     for run in para.runs:
-        # Ищем элемент footnoteReference в run
         refs = run._element.findall(qn('w:footnoteReference'))
         if refs:
             for ref in refs:
                 fn_id = ref.get(qn('w:id'))
                 if fn_id and fn_id in footnote_map:
                     new_runs.append(f'[^{footnote_map[fn_id]}]')
-                # Если id не найден, просто пропускаем
         else:
             if run.text:
                 new_runs.append(run.text)
@@ -56,10 +54,19 @@ def process_paragraph(para, footnote_map):
         return None
 
     style_name = para.style.name if para.style else ''
-    # Заголовки
+
+    # Проверка на заголовок по стилю
     if is_heading(style_name):
         level = get_heading_level(style_name)
+        if level == 0:
+            level = 1  # если не удалось извлечь цифру, считаем уровнем 1
         return '#' * level + ' ' + escape_md(text)
+
+    # Если стиль не заголовочный, проверяем по форматированию
+    level = get_heading_level_by_formatting(para)
+    if level > 0:
+        return '#' * level + ' ' + escape_md(text)
+
     # Списки
     is_ordered, level = get_list_info(para)
     if is_ordered is not None:
@@ -68,6 +75,7 @@ def process_paragraph(para, footnote_map):
             return indent + '1. ' + escape_md(text)
         else:
             return indent + '- ' + escape_md(text)
+
     # Обычный абзац
     return escape_md(text)
 
@@ -114,44 +122,60 @@ def process_footnotes(doc):
         footnote_map: dict {footnote_id (str): sequential_number (int)}
         footnote_texts: list of (sequential_number, text)
     """
-    footnotes_part = None
+    import xml.etree.ElementTree as ET
 
-    # Способ 1: поиск части по типу связи (если доступен)
-    try:
-        from docx.opc.constants import RELATIONSHIP_TYPE as RT
-        footnotes_part = doc.part.package.part_related_by_type(
-            RT.FOOTNOTES, doc.part
-        )
-    except (AttributeError, KeyError):
-        pass
+    footnotes_blob = None
 
-    # Способ 2: если не найден, ищем часть по имени файла
-    if footnotes_part is None:
+    # Способ 1: через атрибут footnotes_part (если есть)
+    if hasattr(doc.part, 'footnotes_part') and doc.part.footnotes_part is not None:
+        part = doc.part.footnotes_part
+        if hasattr(part, 'blob'):
+            footnotes_blob = part.blob
+        # Если нет blob, но есть элемент, сериализуем его
+        elif hasattr(part, 'element'):
+            footnotes_blob = ET.tostring(part.element)
+
+    # Способ 2: поиск по типу связи
+    if footnotes_blob is None:
         try:
-            for part in doc.part.package.iter_parts():
-                if part.partname.endswith('/footnotes.xml'):
-                    footnotes_part = part
-                    break
-        except AttributeError:
+            from docx.opc.constants import RELATIONSHIP_TYPE as RT
+            part = doc.part.package.part_related_by_type(RT.FOOTNOTES, doc.part)
+            if part is not None and hasattr(part, 'blob'):
+                footnotes_blob = part.blob
+        except Exception:
             pass
 
+    # Способ 3: поиск по имени файла
+    if footnotes_blob is None:
+        for part in doc.part.package.iter_parts():
+            if part.partname.endswith('/footnotes.xml'):
+                if hasattr(part, 'blob'):
+                    footnotes_blob = part.blob
+                break
+
     # Если сноски не найдены, возвращаем пустые словари
-    if footnotes_part is None:
-        return {}, {}
+    if footnotes_blob is None:
+        return {}, []
 
     # Парсим XML
-    root = footnotes_part.element
-    footnote_elements = root.findall(qn('w:footnote'))
+    try:
+        root = ET.fromstring(footnotes_blob)
+    except ET.ParseError:
+        return {}, []
+
+    # Пространства имён
+    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    footnote_elements = root.findall('w:footnote', ns)
     footnotes = []
     for fn_elem in footnote_elements:
-        fn_id = fn_elem.get(qn('w:id'))
+        fn_id = fn_elem.get('{' + ns['w'] + '}id')
         # Собираем текст из всех параграфов внутри сноски
-        paragraphs = fn_elem.findall(qn('w:p'))
+        paragraphs = fn_elem.findall('w:p', ns)
         text_parts = []
         for p in paragraphs:
-            runs = p.findall(qn('w:r'))
+            runs = p.findall('w:r', ns)
             for r in runs:
-                t = r.find(qn('w:t'))
+                t = r.find('w:t', ns)
                 if t is not None and t.text:
                     text_parts.append(t.text)
         full_text = ' '.join(text_parts).strip()
@@ -172,20 +196,29 @@ def convert_docx_to_md(docx_path):
     footnote_map, footnote_texts = process_footnotes(doc)
 
     output_lines = []
-    # Обрабатываем параграфы
-    for para in doc.paragraphs:
-        md_line = process_paragraph(para, footnote_map)
-        if md_line is not None:
-            output_lines.append(md_line)
-        else:
-            output_lines.append('')  # пустая строка-разделитель
+    para_counter = 0
+    table_counter = 0
 
-    # Обрабатываем таблицы
-    for table in doc.tables:
-        table_md = process_table(table)
-        if table_md:
-            output_lines.append(table_md)
-            output_lines.append('')  # разделитель после таблицы
+    # Обходим элементы верхнего уровня документа в правильном порядке
+    for child in doc.element.body:
+        if child.tag == qn('w:p'):
+            # Получаем соответствующий параграф по порядку
+            para = doc.paragraphs[para_counter]
+            para_counter += 1
+            md_line = process_paragraph(para, footnote_map)
+            if md_line is not None:
+                output_lines.append(md_line)
+            else:
+                output_lines.append('')  # пустая строка-разделитель
+        elif child.tag == qn('w:tbl'):
+            # Получаем соответствующую таблицу по порядку
+            table = doc.tables[table_counter]
+            table_counter += 1
+            table_md = process_table(table)
+            if table_md:
+                output_lines.append(table_md)
+                output_lines.append('')  # разделитель после таблицы
+        # Другие элементы (например, разделы) игнорируем
 
     # Добавляем сноски в конец
     if footnote_texts:
