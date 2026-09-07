@@ -27,14 +27,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_USERNAME }}/doc2md # Замените на имя вашего репозитория на Docker Hub
+          images: ${{ secrets.DOCKER_USERNAME }}/docx2md # Замените на имя вашего репозитория на Docker Hub
           tags: |
             # Если это тег (например, v1.2.3), то создаются теги: 1.2.3, 1.2, 1, latest
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=latest
             # Если это push в основную ветку (main), создается тег latest
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            # type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -45,6 +46,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
       - name: Update Docker Hub Description
         uses: peter-evans/dockerhub-description@v3
         with:
